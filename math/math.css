@@ -1,0 +1,30 @@
+/*
+ * Math: the little that MathML needs beyond the browser's own rendering.
+ *
+ * The colors come from the app's variables, so a formula follows the theme (light or dark) like the text around it.
+ */
+
+.math-inline {
+  white-space: nowrap;
+  color: inherit;
+  /* MathML follows the size around it; a little larger reads like the body text. */
+  font-size: 1.22em;
+}
+
+.math-display {
+  display: block;
+  margin: 10px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+  color: inherit;
+}
+
+/* Long formulas scroll sideways instead of widening the reply, as tables do. */
+.math-display math {
+  display: inline-block;
+  max-width: 100%;
+  font-size: 1.32em;
+  /* MathML's own line height is tight: give the scripts room. */
+  line-height: 1.5;
+}
