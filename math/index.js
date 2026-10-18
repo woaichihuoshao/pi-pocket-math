@@ -8,6 +8,10 @@
  *
  * What it skips: text inside code, preformatted blocks, links, and anything already rendered. Inline `$…$` is only
  * treated as math when it looks like math (a backslash, `^`, `_`, `=`, or braces), so "$5 and $10" stays a price.
+ *
+ * Cost while a reply streams in: only the text nodes that were just added are examined, and only when they carry a
+ * dollar or `\(`/`\[` at all. A block is never re-scanned as a whole, so a long answer costs the same per chunk however
+ * long it gets.
  */
 export const pocketApi = 1;
 
@@ -34,11 +38,27 @@ function looksLikeMath(body) {
   return /[\\^_={}]/.test(body);
 }
 
+/** Whether a text node can hold anything this module renders: a cheap check before the real one. */
+function mightHoldMath(text) {
+  return text.includes("$") || text.includes("\\(") || text.includes("\\[");
+}
+
+/** Whether a node sits where math is not rendered (code, a link, an existing formula, an editor). */
+function offLimits(node) {
+  const parent = node.parentElement;
+
+  return (
+    parent === null ||
+    parent.closest("code, pre, a, textarea, .math-inline, .math-display") !==
+      null
+  );
+}
+
 /** One text node's math, as a fragment: the text before, the formula, the text after. */
 function renderIn(node, temml) {
   const text = node.nodeValue ?? "";
 
-  if (!text.includes("$") && !text.includes("\\(") && !text.includes("\\[")) {
+  if (!mightHoldMath(text)) {
     return null;
   }
 
@@ -95,46 +115,75 @@ function renderIn(node, temml) {
   return fragment;
 }
 
-/** Render every unrendered `.md` in a subtree (`root` itself included). */
-function renderAll(root, temml) {
-  const blocks = [];
-
-  if (root.nodeType === 1 && root.matches?.(".md")) {
-    blocks.push(root);
-  }
-
-  if (root.querySelectorAll !== undefined) {
-    blocks.push(...root.querySelectorAll(".md"));
-  }
-
-  for (const block of blocks) {
-    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
-      acceptNode(node) {
-        const parent = node.parentElement;
-
-        if (parent === null) {
-          return NodeFilter.FILTER_REJECT;
-        }
-
-        if (parent.closest("code, pre, a, .math-inline, .math-display")) {
-          return NodeFilter.FILTER_REJECT;
-        }
-
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-    const nodes = [];
-
-    while (walker.nextNode() !== null) {
-      nodes.push(walker.currentNode);
+/**
+ * Render the math a subtree holds, visiting only its text nodes. Called with what a mutation just added, so the work
+ * is proportional to the new chunk and never to the whole reply.
+ */
+function renderTree(root, temml) {
+  if (root.nodeType === Node.TEXT_NODE) {
+    if (offLimits(root)) {
+      return;
     }
 
-    for (const node of nodes) {
-      const rendered = renderIn(node, temml);
+    const rendered = renderIn(root, temml);
+
+    if (rendered !== null) {
+      root.replaceWith(rendered);
+    }
+
+    return;
+  }
+
+  if (root.nodeType !== Node.ELEMENT_NODE) {
+    return;
+  }
+
+  // A whole formula, or code: nothing inside is ours.
+  if (root.matches("code, pre, a, textarea, .math-inline, .math-display")) {
+    return;
+  }
+
+  // The common case in a reply: one line of text in a `<p>`, with no dollar anywhere.
+  if (
+    root.childNodes.length === 1 &&
+    root.firstChild.nodeType === Node.TEXT_NODE
+  ) {
+    if (
+      root.firstChild.nodeValue?.includes("$") === true ||
+      mightHoldMath(root.firstChild.nodeValue ?? "")
+    ) {
+      const rendered = renderIn(root.firstChild, temml);
 
       if (rendered !== null) {
-        node.replaceWith(rendered);
+        root.firstChild.replaceWith(rendered);
       }
+    }
+
+    return;
+  }
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (offLimits(node)) {
+        return NodeFilter.FILTER_REJECT;
+      }
+
+      return mightHoldMath(node.nodeValue ?? "")
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_SKIP;
+    },
+  });
+  const nodes = [];
+
+  while (walker.nextNode() !== null) {
+    nodes.push(walker.currentNode);
+  }
+
+  for (const node of nodes) {
+    const rendered = renderIn(node, temml);
+
+    if (rendered !== null) {
+      node.replaceWith(rendered);
     }
   }
 }
@@ -149,20 +198,14 @@ export default function setup(pocket) {
         return;
       }
 
-      renderAll(document.body, temml);
+      // What was on the page before the observer: once, in full.
+      renderTree(document.body, temml);
 
-      // Replies stream in: render each piece as it lands, never twice.
+      // Replies stream in: only the nodes that just arrived are examined, so a long answer costs the same per chunk.
       const observer = new MutationObserver((records) => {
         for (const record of records) {
           for (const node of record.addedNodes) {
-            if (node.nodeType === 1) {
-              renderAll(node, temml);
-            } else if (node.parentElement) {
-              renderAll(
-                node.parentElement.closest(".md") ?? node.parentElement,
-                temml,
-              );
-            }
+            renderTree(node, temml);
           }
         }
       });
